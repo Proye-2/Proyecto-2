@@ -13,7 +13,7 @@ import calendar
 import uvicorn 
 
 # --- Configuración ---
-S3_BUCKET_NAME = os.environ.get("S3_MODEL_BUCKET", "my-air-quality-bucket")
+S3_BUCKET_NAME = os.environ.get("S3_MODEL_BUCKET", "proyecto-2-0953476d60561c955")
 PM25_MODEL_KEY = "models/best_model_pm25.pkl"
 PM10_MODEL_KEY = "models/best_model_pm10.pkl"
 
