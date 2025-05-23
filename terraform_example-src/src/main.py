@@ -117,7 +117,11 @@ async def health_check():
     return estado
 
 # --- Servir frontend HTML ---
-app.mount("/static", StaticFiles(directory="static"), name="static")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+static_dir = os.path.join(BASE_DIR, "static")
+
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
