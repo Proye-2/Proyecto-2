@@ -1,124 +1,134 @@
-import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
-import xgboost as xgb
-import numpy as np
+from typing import List
 import os
-import boto3 # Import boto3
-import tempfile # To handle temporary file for model download
+import boto3
+import joblib
+import tempfile
+from datetime import datetime, timedelta
+import numpy as np
+import calendar
+import uvicorn 
 
-# Define the input data schema using Pydantic
-class InferenceInput(BaseModel):
-    # Example: Define the features your model expects
-    # Replace with your actual feature names and types
-    feature1: float
-    feature2: float
-    # Add more features as needed
+# --- Configuración ---
+S3_BUCKET_NAME = os.environ.get("S3_MODEL_BUCKET", "my-air-quality-bucket")
+PM25_MODEL_KEY = "models/best_model_pm25.pkl"
+PM10_MODEL_KEY = "models/best_model_pm10.pkl"
 
-# Define the output data schema using Pydantic
-class InferenceOutput(BaseModel):
-    prediction: int # Or list[float] if predicting multiple values
+LOCAL_PM25_PATH = os.path.join(tempfile.gettempdir(), "best_model_pm25.pkl")
+LOCAL_PM10_PATH = os.path.join(tempfile.gettempdir(), "best_model_pm10.pkl")
 
-# Initialize FastAPI app
-app = FastAPI(title="XGBoost Inference API")
+app = FastAPI()
 
-# --- Configuration for S3 ---
-# It's recommended to use environment variables for sensitive info like bucket names
-S3_BUCKET_NAME = os.environ.get("S3_MODEL_BUCKET", "my-unique-microservice-bucket-12345") # Replace with your bucket name or env var
-S3_MODEL_KEY = os.environ.get("S3_MODEL_KEY", "model/model.bst") # Replace with the key (path) in your bucket
-LOCAL_MODEL_PATH = os.path.join(tempfile.gettempdir(), "model.bst") # Temporary path to store downloaded model
+# --- Modelos globales ---
+model_pm25 = None
+model_pm10 = None
 
-booster = None
-s3_client = None
+# --- Clases Pydantic ---
+class FechaInput(BaseModel):
+    fecha: str  # formato: 'YYYY-MM-DD'
 
-@app.on_event("startup")
-async def load_model():
-    """Loads the XGBoost model from S3 on startup."""
-    global booster, s3_client
-    print(f"Attempting to load model from S3 bucket '{S3_BUCKET_NAME}' with key '{S3_MODEL_KEY}'")
+class DiaPrediccion(BaseModel):
+    fecha: str
+    pm25: float
+    pm10: float
+    calidad_aire: str
+
+class PrediccionRespuesta(BaseModel):
+    predicciones: List[DiaPrediccion]
+
+# --- Cargar modelos desde S3 ---
+def cargar_modelos():
+    global model_pm25, model_pm10
+    s3 = boto3.client("s3")
+
+    s3.download_file(S3_BUCKET_NAME, PM25_MODEL_KEY, LOCAL_PM25_PATH)
+    s3.download_file(S3_BUCKET_NAME, PM10_MODEL_KEY, LOCAL_PM10_PATH)
+
+    model_pm25 = joblib.load(LOCAL_PM25_PATH)
+    model_pm10 = joblib.load(LOCAL_PM10_PATH)
+
+# --- Generar características ---
+def extraer_features(date_obj):
+    day_of_week = date_obj.weekday()
+    day_of_year = date_obj.timetuple().tm_yday
+    is_weekend = int(day_of_week >= 5)
+    month = date_obj.month
+
+    # Temporada (codificada como número)
+    season = (
+        0 if month in [12, 1, 2] else
+        1 if month in [3, 4, 5] else
+        2 if month in [6, 7, 8] else
+        3
+    )
+
+    return [date_obj.year, date_obj.month, date_obj.day, day_of_week, day_of_year, is_weekend, season]
+
+# --- Clasificar calidad del aire ---
+def clasificar_calidad(pm25, pm10):
+    if pm25 <= 12 and pm10 <= 50:
+        return "Buena"
+    elif pm25 <= 35.4 and pm10 <= 100:
+        return "Moderada"
+    else:
+        return "Mala"
+
+# --- Endpoint principal de predicción ---
+@app.post("/predict", response_model=PrediccionRespuesta)
+async def predecir_calidad(input: FechaInput):
+    if model_pm25 is None or model_pm10 is None:
+        raise HTTPException(status_code=500, detail="Modelos no cargados.")
 
     try:
-        s3_client = boto3.client('s3')
-        # Download the model file from S3 to a temporary local path
-        s3_client.download_file(S3_BUCKET_NAME, S3_MODEL_KEY, LOCAL_MODEL_PATH)
-        print(f"Model downloaded successfully from S3 to {LOCAL_MODEL_PATH}")
+        fecha_base = datetime.strptime(input.fecha, "%Y-%m-%d")
+        predicciones = []
 
-        # Load the model from the downloaded file
-        booster = xgb.Booster()
-        booster.load_model(LOCAL_MODEL_PATH)
-        print(f"Model loaded successfully from {LOCAL_MODEL_PATH}")
+        for i in range(7):
+            fecha_pred = fecha_base + timedelta(days=i)
+            features = np.array([extraer_features(fecha_pred)])
 
-    except boto3.exceptions.S3UploadFailedError as e:
-         # Handle case where key might be wrong or bucket doesn't exist, etc.
-         # boto3.exceptions.ClientError is broader but NoCredentialsError, etc., might be relevant
-         print(f"Error downloading model from S3: {e}. Check bucket name, key, and AWS credentials/permissions.")
-         booster = None
-    except xgb.core.XGBoostError as e:
-        print(f"Error loading XGBoost model from downloaded file: {e}")
-        booster = None
+            pred_pm25 = model_pm25.predict(features)[0]
+            pred_pm10 = model_pm10.predict(features)[0]
+            calidad = clasificar_calidad(pred_pm25, pred_pm10)
+
+            predicciones.append(DiaPrediccion(
+                fecha=fecha_pred.strftime("%Y-%m-%d"),
+                pm25=round(pred_pm25, 2),
+                pm10=round(pred_pm10, 2),
+                calidad_aire=calidad
+            ))
+
+        return {"predicciones": predicciones}
+
     except Exception as e:
-        print(f"An unexpected error occurred during model loading: {e}")
-        booster = None
-    finally:
-        # Clean up the downloaded file if it exists
-        if os.path.exists(LOCAL_MODEL_PATH):
-            try:
-                os.remove(LOCAL_MODEL_PATH)
-                print(f"Cleaned up temporary model file: {LOCAL_MODEL_PATH}")
-            except OSError as e:
-                print(f"Error removing temporary model file {LOCAL_MODEL_PATH}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.post("/predict", response_model=InferenceOutput)
-async def predict(input_data: InferenceInput):
-    """
-    Runs inference using the loaded XGBoost model.
-    Takes input features and returns the prediction.
-    """
-    if booster is None:
-        raise HTTPException(status_code=503, detail="Model is not loaded or failed to load.")
-
-    try:
-        # Convert input data to the format XGBoost expects (DMatrix or numpy array)
-        # This example assumes input features are directly usable.
-        # You might need preprocessing steps here.
-        features = np.array([[input_data.feature1, input_data.feature2]]) # Adjust based on your features
-        dmatrix = xgb.DMatrix(features)
-
-        # Make prediction
-        prediction = booster.predict(dmatrix)
-        
-
-        # Assuming the model returns a single prediction value
-        result = int(np.argmax(prediction[0]))
-
-        return InferenceOutput(prediction=result)
-
-    except xgb.core.XGBoostError as e:
-        raise HTTPException(status_code=500, detail=f"XGBoost prediction error: {e}")
-    except Exception as e:
-        # Catch other potential errors during prediction/preprocessing
-        raise HTTPException(status_code=500, detail=f"An error occurred during prediction: {e}")
-
+# --- Health check ---
 @app.get("/health")
 async def health_check():
-    """Basic health check endpoint."""
-    # Add more sophisticated checks if needed (e.g., model loaded status)
-    model_status = "loaded" if booster is not None else "not loaded"
-    return {"status": "ok", "model_status": model_status}
+    estado = {
+        "status": "ok",
+        "pm25_model": "loaded" if model_pm25 else "not loaded",
+        "pm10_model": "loaded" if model_pm10 else "not loaded"
+    }
+    return estado
 
-# --- Running the App ---
-# To run the app, navigate to the 'src' directory in your terminal
-# and run: uvicorn main:app --reload
-#
-# Example using curl to test the /predict endpoint (replace with actual features):
-# curl -X POST "http://127.0.0.1:8000/predict" -H "Content-Type: application/json" -d '{"feature1": 1.0, "feature2": 2.5}'
-#
-# Example using curl to test the /health endpoint:
-# curl "http://127.0.0.1:8000/health"
+# --- Servir frontend HTML ---
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    return FileResponse("static/index.html")
+
+# --- Cargar modelos al iniciar ---
+@app.on_event("startup")
+def startup_event():
+    cargar_modelos()
+
+# --- Para correr localmente ---
 if __name__ == "__main__":
-    # This allows running the app directly using 'python main.py'
-    # Uvicorn is the recommended way for development and production
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
