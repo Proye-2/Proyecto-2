@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Predicción de Calidad del Aire</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 2rem;
+      background-image: url('https://radionacional-v3.s3.amazonaws.com/s3fs-public/styles/portadas_relaciona_4_3/public/node/article/field_image/Medell%C3%ADn%20recibe%20calificaci%C3%B3n%20A%20por%20estrategias%20para%20enfrentar%20el%20cambio%20clim%C3%A1tico%20%20%282%29_0.jpeg?h=1c9b88c9&itok=I6EgO_-Y');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+
+    .container {
+      background: rgba(255, 255, 255, 0.9);
+      padding: 2rem;
+      border-radius: 10px;
+      max-width: 600px;
+      margin: auto;
+      box-shadow: 0 4px 10px rgba(7, 245, 165, 0.2);
+    }
+
+    h2 {
+      text-align: center;
+      color: #8999ce;
+      background-color: white;
+      padding: 10px 20px;
+      border-radius: 8px;
+      display: inline-block;
+      box-shadow: 0 2px 6px rgba(93, 209, 16, 0.1);
+    }
+
+    .etiqueta-verde {
+      color: #006400;
+      font-weight: bold;
+    }
+
+    input, button {
+      width: 100%;
+      padding: 10px;
+      margin: 1rem 0;
+      border-radius: 5px;
+      border: 1px solid #ccc;
+    }
+
+    button {
+      background-color: #007BFF;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background-color: #0056b3;
+    }
+
+    .resultado {
+      margin-top: 1rem;
+    }
+
+    .dia {
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 5px;
+      font-weight: bold;
+    }
+
+    .bueno {
+      background-color: #c8f7c5;
+      color: #256029;
+    }
+
+    .moderada {
+      background-color: #fff3cd;
+      color: #856404;
+    }
+
+    .mala {
+      background-color: #f8d7da;
+      color: #721c24;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Predicción de Calidad del Aire</h2>
+    <label for="fecha" class="etiqueta-verde">Selecciona una fecha:</label>
+    <input type="date" id="fecha" />
+    <button onclick="predecirCalidad()">Predecir próximos 7 días</button>
+    <div class="resultado" id="resultado"></div>
+  </div>
+
+  <script>
+    async function predecirCalidad() {
+      const fecha = document.getElementById("fecha").value;
+      const resultado = document.getElementById("resultado");
+      resultado.innerHTML = "";
+
+      if (!fecha) {
+        resultado.innerHTML = "<p>Por favor selecciona una fecha.</p>";
+        return;
+      }
+
+      try {
+        const response = await fetch("/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fecha: fecha })
+        });
+
+        if (!response.ok) {
+          throw new Error("Error al obtener predicción.");
+        }
+
+        const data = await response.json();
+
+        data.predicciones.forEach((dia) => {
+          const div = document.createElement("div");
+          let clase = dia.calidad_aire.toLowerCase();
+          clase = clase === "moderada" ? "moderada" : clase; // ajuste por consistencia
+          div.className = `dia ${clase}`;
+          const fechaLocal = new Date(dia.fecha).toLocaleDateString("es-ES", {
+            weekday: "long", day: "numeric", month: "short"
+          });
+          div.textContent = `${fechaLocal}: PM2.5=${dia.pm25}, PM10=${dia.pm10}, Calidad: ${dia.calidad_aire}`;
+          resultado.appendChild(div);
+        });
+      } catch (error) {
+        resultado.innerHTML = `<p>Error: ${error.message}</p>`;
+      }
+    }
+  </script>
+</body>
+</html>
