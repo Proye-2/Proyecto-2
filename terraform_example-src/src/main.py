@@ -125,8 +125,9 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend():
-    return FileResponse("static/prediction_air.html")
-
+    html_path = os.path.join(static_dir, "prediction_air.html")
+    return FileResponse(html_path)
+    
 # --- Cargar modelos al iniciar ---
 @app.on_event("startup")
 def startup_event():
